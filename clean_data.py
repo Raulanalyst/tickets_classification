@@ -82,7 +82,10 @@ def clean_ticket_data(input_file, output_file, batch_size=10000):
                     if not ticket_type:
                         no_type += 1
                         continue
-                    
+                    elif ticket_type in ["Question","Duplicate"]:
+                        no_type += 1
+                        continue
+
                     if not ticket_name:
                         no_name += 1
                         continue
