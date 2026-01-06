@@ -53,7 +53,8 @@ def clean_ticket_data(input_file, output_file, batch_size=10000):
     no_type = 0
     no_name = 0
     no_format = 0
-    
+    delete = ["Question","Duplicate", "Change", "Change normal", "Problem", "Change standard", "Change emergency", "Undefined"]
+    stay = ["Service Request Normal", "Incident Low (P4)", "Incident Medium (P3)", "Incident High (P2)", "Incident Critical (P1)", "Service Request High", "Service Request Low", "Service Request Medium", "Incident Normal (P3)"]
     try:
         with open(input_file, 'r', encoding='utf-8') as infile, \
              open(output_file, 'w', encoding='utf-8', buffering=1024*1024) as outfile:
@@ -82,7 +83,7 @@ def clean_ticket_data(input_file, output_file, batch_size=10000):
                     if not ticket_type:
                         no_type += 1
                         continue
-                    elif ticket_type in ["Question","Duplicate"]:
+                    elif ticket_type in delete:
                         no_type += 1
                         continue
 

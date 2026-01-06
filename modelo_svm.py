@@ -1,18 +1,18 @@
 import pandas as pd
 import numpy as np
 import json
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold, cross_validate
 from sklearn.svm import LinearSVC
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, make_scorer, f1_score
 from sklearn.pipeline import Pipeline
 from sklearn.utils.class_weight import compute_class_weight
 import pickle
 import warnings
 import matplotlib.pyplot as plt
 import seaborn as sns
-from matplotlib.gridspec import GridSpec
+import os
 
 warnings.filterwarnings('ignore')
 
@@ -64,6 +64,7 @@ class TicketClassifierSVM:
         self.label_encoder = LabelEncoder()
         self.is_trained = False
         self.class_distribution = None
+        self.cv_results = None
         
     @staticmethod
     def load_jsonl(file_path):
@@ -140,13 +141,296 @@ class TicketClassifierSVM:
         print(f"  - Ratio de desbalance: {ratio:.1f}:1")
         
         self.class_distribution = distribution
-        
         return distribution
     
+    def cross_validate_model(self, X, y, n_splits=5):
+        """
+        Realiza validación cruzada estratificada
+        
+        Args:
+            X: Features (textos combinados)
+            y: Etiquetas
+            n_splits: Número de folds (default: 5)
+            
+        Returns:
+            Dict con resultados de validación cruzada
+        """
+        print("\n" + "="*70)
+        print("VALIDACIÓN CRUZADA ESTRATIFICADA")
+        print("="*70)
+        print(f"Número de folds: {n_splits}")
+        print(f"Total de muestras: {len(X):,}")
+        print(f"Muestras por fold (aprox): {len(X)//n_splits:,}")
+        
+        # Codificar etiquetas
+        y_encoded = self.label_encoder.fit_transform(y)
+        
+        # Configurar validación cruzada estratificada
+        skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+        
+        # Métricas a evaluar
+        scoring = {
+            'accuracy': 'accuracy',
+            'precision_macro': 'precision_macro',
+            'recall_macro': 'recall_macro',
+            'f1_macro': 'f1_macro',
+            'precision_weighted': 'precision_weighted',
+            'recall_weighted': 'recall_weighted',
+            'f1_weighted': 'f1_weighted'
+        }
+        
+        print("\nIniciando validación cruzada...")
+        print("(Esto puede tomar varios minutos dependiendo del tamaño del dataset)")
+        print()
+        
+        # Realizar validación cruzada
+        cv_results = cross_validate(
+            self.pipeline,
+            X,
+            y_encoded,
+            cv=skf,
+            scoring=scoring,
+            return_train_score=True,
+            n_jobs=-1,
+            verbose=1
+        )
+        
+        self.cv_results = cv_results
+        
+        # Mostrar resultados
+        print("\n" + "="*70)
+        print("RESULTADOS DE VALIDACIÓN CRUZADA")
+        print("="*70)
+        
+        metrics_to_show = [
+            ('accuracy', 'Accuracy'),
+            ('precision_macro', 'Precision (Macro)'),
+            ('recall_macro', 'Recall (Macro)'),
+            ('f1_macro', 'F1-Score (Macro)'),
+            ('precision_weighted', 'Precision (Weighted)'),
+            ('recall_weighted', 'Recall (Weighted)'),
+            ('f1_weighted', 'F1-Score (Weighted)')
+        ]
+        
+        print(f"\n{'Métrica':<25} {'Train':>12} {'Test':>12} {'Diff':>12}")
+        print("-"*70)
+        
+        for metric_key, metric_name in metrics_to_show:
+            train_scores = cv_results[f'train_{metric_key}']
+            test_scores = cv_results[f'test_{metric_key}']
+            
+            train_mean = np.mean(train_scores)
+            test_mean = np.mean(test_scores)
+            diff = train_mean - test_mean
+            
+            print(f"{metric_name:<25} {train_mean:>12.4f} {test_mean:>12.4f} {diff:>12.4f}")
+        
+        print("\n" + "="*70)
+        print("ESTADÍSTICAS DETALLADAS (TEST SET)")
+        print("="*70)
+        print(f"\n{'Métrica':<25} {'Media':>10} {'Std':>10} {'Min':>10} {'Max':>10}")
+        print("-"*70)
+        
+        for metric_key, metric_name in metrics_to_show:
+            test_scores = cv_results[f'test_{metric_key}']
+            print(f"{metric_name:<25} "
+                  f"{np.mean(test_scores):>10.4f} "
+                  f"{np.std(test_scores):>10.4f} "
+                  f"{np.min(test_scores):>10.4f} "
+                  f"{np.max(test_scores):>10.4f}")
+        
+        # Análisis de overfitting
+        print("\n" + "="*70)
+        print("ANÁLISIS DE OVERFITTING")
+        print("="*70)
+        
+        accuracy_diff = np.mean(cv_results['train_accuracy']) - np.mean(cv_results['test_accuracy'])
+        f1_diff = np.mean(cv_results['train_f1_weighted']) - np.mean(cv_results['test_f1_weighted'])
+        
+        print(f"\nDiferencia Train-Test:")
+        print(f"  Accuracy: {accuracy_diff:.4f} ({accuracy_diff*100:.2f}%)")
+        print(f"  F1-Score (Weighted): {f1_diff:.4f} ({f1_diff*100:.2f}%)")
+        
+        if accuracy_diff > 0.10:
+            print("\n⚠ ADVERTENCIA: Posible overfitting detectado (diferencia > 10%)")
+            print("  Considera:")
+            print("  - Aumentar regularización (reducir C)")
+            print("  - Reducir max_features")
+            print("  - Añadir más datos de entrenamiento")
+        elif accuracy_diff > 0.05:
+            print("\n⚠ ATENCIÓN: Overfitting moderado (diferencia 5-10%)")
+        else:
+            print("\n✓ Buen balance entre train y test")
+        
+        # Resultados por fold
+        print("\n" + "="*70)
+        print("RESULTADOS POR FOLD")
+        print("="*70)
+        print(f"\n{'Fold':>6} {'Accuracy':>12} {'F1-Macro':>12} {'F1-Weighted':>12}")
+        print("-"*70)
+        
+        for i in range(n_splits):
+            print(f"{i+1:>6} "
+                  f"{cv_results['test_accuracy'][i]:>12.4f} "
+                  f"{cv_results['test_f1_macro'][i]:>12.4f} "
+                  f"{cv_results['test_f1_weighted'][i]:>12.4f}")
+        
+        return cv_results
+    
+    def plot_cv_results(self, output_dir):
+        """
+        Crea visualizaciones de los resultados de validación cruzada
+        
+        Args:
+            output_dir: Directorio donde guardar las imágenes
+        """
+        if self.cv_results is None:
+            raise ValueError("No hay resultados de validación cruzada. Ejecuta cross_validate_model() primero.")
+        
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        print("\n" + "="*70)
+        print("GENERANDO GRÁFICAS DE VALIDACIÓN CRUZADA")
+        print("="*70)
+        
+        plt.style.use('seaborn-v0_8-darkgrid')
+        
+        # =====================================================================
+        # GRÁFICA 1: Comparación Train vs Test por métrica
+        # =====================================================================
+        print("1/3 Generando: Comparación Train vs Test...")
+        
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        metrics = [
+            ('accuracy', 'Accuracy'),
+            ('precision_macro', 'Precision Macro'),
+            ('recall_macro', 'Recall Macro'),
+            ('f1_macro', 'F1 Macro'),
+            ('precision_weighted', 'Precision Weighted'),
+            ('recall_weighted', 'Recall Weighted'),
+            ('f1_weighted', 'F1 Weighted')
+        ]
+        
+        train_means = [np.mean(self.cv_results[f'train_{m[0]}']) for m in metrics]
+        test_means = [np.mean(self.cv_results[f'test_{m[0]}']) for m in metrics]
+        metric_labels = [m[1] for m in metrics]
+        
+        x = np.arange(len(metrics))
+        width = 0.35
+        
+        bars1 = ax.bar(x - width/2, train_means, width, label='Train', 
+                      color='#3498db', alpha=0.8)
+        bars2 = ax.bar(x + width/2, test_means, width, label='Test', 
+                      color='#e74c3c', alpha=0.8)
+        
+        ax.set_xlabel('Métricas', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Score', fontsize=12, fontweight='bold')
+        ax.set_title('Validación Cruzada: Train vs Test', fontsize=14, fontweight='bold', pad=20)
+        ax.set_xticks(x)
+        ax.set_xticklabels(metric_labels, rotation=45, ha='right', fontsize=10)
+        ax.legend(fontsize=11)
+        ax.set_ylim([0, 1.1])
+        ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.3)
+        ax.axhline(y=0.7, color='gray', linestyle='--', alpha=0.3)
+        ax.grid(axis='y', alpha=0.3)
+        
+        # Añadir valores sobre las barras
+        for bar in bars1:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.3f}', ha='center', va='bottom', fontsize=8)
+        for bar in bars2:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.3f}', ha='center', va='bottom', fontsize=8)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}/cv_01_train_vs_test.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # =====================================================================
+        # GRÁFICA 2: Boxplot de métricas por fold
+        # =====================================================================
+        print("2/3 Generando: Distribución por Fold...")
+        
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        test_data = [self.cv_results[f'test_{m[0]}'] for m in metrics]
+        
+        bp = ax.boxplot(test_data, labels=metric_labels, patch_artist=True,
+                       notch=True, showmeans=True)
+        
+        # Colorear las cajas
+        colors = sns.color_palette("husl", len(metrics))
+        for patch, color in zip(bp['boxes'], colors):
+            patch.set_facecolor(color)
+            patch.set_alpha(0.7)
+        
+        ax.set_xlabel('Métricas', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Score', fontsize=12, fontweight='bold')
+        ax.set_title('Distribución de Métricas Across Folds (Test Set)', 
+                    fontsize=14, fontweight='bold', pad=20)
+        ax.set_xticklabels(metric_labels, rotation=45, ha='right', fontsize=10)
+        ax.set_ylim([0, 1.1])
+        ax.axhline(y=0.5, color='red', linestyle='--', alpha=0.3, label='Baseline 0.5')
+        ax.axhline(y=0.7, color='orange', linestyle='--', alpha=0.3, label='Target 0.7')
+        ax.legend(loc='lower right')
+        ax.grid(axis='y', alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}/cv_02_boxplot_folds.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # =====================================================================
+        # GRÁFICA 3: Performance por Fold (líneas)
+        # =====================================================================
+        print("3/3 Generando: Performance por Fold...")
+        
+        fig, ax = plt.subplots(figsize=(12, 8))
+        
+        n_folds = len(self.cv_results['test_accuracy'])
+        folds = list(range(1, n_folds + 1))
+        
+        # Seleccionar métricas clave para visualizar
+        key_metrics = [
+            ('test_accuracy', 'Accuracy', '#3498db'),
+            ('test_f1_macro', 'F1-Score (Macro)', '#e74c3c'),
+            ('test_f1_weighted', 'F1-Score (Weighted)', '#2ecc71')
+        ]
+        
+        for metric_key, label, color in key_metrics:
+            scores = self.cv_results[metric_key]
+            ax.plot(folds, scores, marker='o', linewidth=2, 
+                   label=label, color=color, markersize=8)
+        
+        ax.set_xlabel('Fold', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Score', fontsize=12, fontweight='bold')
+        ax.set_title('Performance por Fold (Test Set)', fontsize=14, fontweight='bold', pad=20)
+        ax.set_xticks(folds)
+        ax.set_ylim([0, 1.1])
+        ax.axhline(y=0.5, color='gray', linestyle='--', alpha=0.3)
+        ax.axhline(y=0.7, color='gray', linestyle='--', alpha=0.3)
+        ax.legend(fontsize=11, loc='lower right')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(f'{output_dir}/cv_03_performance_by_fold.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print("\n" + "="*70)
+        print("✓ GRÁFICAS DE VALIDACIÓN CRUZADA GENERADAS")
+        print("="*70)
+        print(f"Ubicación: {output_dir}/")
+        print("\nArchivos generados:")
+        print("  1. cv_01_train_vs_test.png")
+        print("  2. cv_02_boxplot_folds.png")
+        print("  3. cv_03_performance_by_fold.png")
+        print("="*70)
+    
     def train(self, X_train, y_train):
-        """
-        Entrena el modelo SVM con manejo de clases desbalanceadas
-        """
+        """Entrena el modelo SVM con manejo de clases desbalanceadas"""
         print("="*70)
         print("INICIANDO ENTRENAMIENTO")
         print("="*70)
@@ -192,7 +476,6 @@ class TicketClassifierSVM:
         
         y_pred_encoded = self.pipeline.predict(X_test)
         y_pred = self.label_encoder.inverse_transform(y_pred_encoded)
-        
         return y_pred
     
     def predict_with_confidence(self, X_test):
@@ -235,6 +518,7 @@ class TicketClassifierSVM:
         
         # Métricas globales
         accuracy = accuracy_score(y_test, y_pred)
+        
         print(f"Accuracy Global: {accuracy:.4f} ({accuracy*100:.2f}%)")
         print()
         
@@ -683,7 +967,8 @@ class TicketClassifierSVM:
             'max_features': self.max_features,
             'ngram_range': self.ngram_range,
             'C': self.C,
-            'class_distribution': self.class_distribution
+            'class_distribution': self.class_distribution,
+            'cv_results': self.cv_results
         }
         
         with open(path, 'wb') as f:
@@ -692,20 +977,22 @@ class TicketClassifierSVM:
         print(f"\n✓ Modelo guardado exitosamente en: {path}")
 
 # ============================================================================
-# SCRIPT DE ENTRENAMIENTO PRINCIPAL
+# SCRIPT PRINCIPAL CON VALIDACIÓN CRUZADA
 # ============================================================================
 
 if __name__ == "__main__":
     
     print("="*70)
     print("CLASIFICADOR DE TICKETS - SISTEMA DE SOPORTE")
+    print("CON VALIDACIÓN CRUZADA ESTRATIFICADA")
     print("="*70)
     print()
     
     # CONFIGURACIÓN
-    JSONL_FILE = 'tickets_cleaned.jsonl'
-    TEST_SIZE = 0.2
+    JSONL_FILE = 'tickets_cleaned_short.jsonl'
+    TEST_SIZE = 0.3
     RANDOM_STATE = 42
+    N_FOLDS = 5  # Número de folds para validación cruzada
     
     # 1. Cargar datos
     print("PASO 1: CARGA DE DATOS")
@@ -757,37 +1044,48 @@ if __name__ == "__main__":
     X_test = classifier.combine_text(test_df)
     y_test = test_df['type']
     
-    # 5. Entrenar modelo
+    # 5. VALIDACIÓN CRUZADA
     print("\n" + "="*70)
-    print("PASO 4: ENTRENAMIENTO")
+    print("PASO 4: VALIDACIÓN CRUZADA")
+    print("-" * 70)
+    
+    cv_results = classifier.cross_validate_model(X_train, y_train, n_splits=N_FOLDS)
+    
+    # 6. Generar gráficas de validación cruzada
+    print("\n" + "="*70)
+    print("PASO 5: VISUALIZACIONES DE VALIDACIÓN CRUZADA")
+    print("-" * 70)
+    
+    classifier.plot_cv_results(output_dir='graficas_svm_short')
+    
+    # 7. Entrenar modelo final con todos los datos de entrenamiento
+    print("\n" + "="*70)
+    print("PASO 6: ENTRENAMIENTO DEL MODELO FINAL")
     print("-" * 70)
     
     classifier.train(X_train, y_train)
     
-    # 6. Evaluar modelo
+    # 8. Evaluar en test set
     print("\n" + "="*70)
-    print("PASO 5: EVALUACIÓN")
+    print("PASO 7: EVALUACIÓN EN TEST SET")
     print("-" * 70)
     
     y_pred = classifier.evaluate(X_test, y_test, show_per_class=True)
     
-    # 7. Palabras importantes
-    classifier.get_feature_importance(top_n=8)
-    
-    # 8. GENERAR GRÁFICAS
-    print("\n" + "="*70)
-    print("PASO 6: GENERACIÓN DE VISUALIZACIONES")
-    print("-" * 70)
-    
-    classifier.plot_results(X_test, y_test, y_pred, output_dir='graficas_svm')
-
     # 9. Guardar modelo
     print("\n" + "="*70)
-    print("PASO 6: GUARDAR MODELO")
+    print("PASO 8: GUARDAR MODELO")
     print("-" * 70)
     
-    classifier.save_model('ticket_classifier_svm.pkl')
+    classifier.save_model('ticket_classifier_svm_short.pkl')
     
-    print("="*70)
+    print("\n" + "="*70)
     print("PROCESO COMPLETADO")
+    print("="*70)
+    print("\nResumen:")
+    print(f"  - Validación cruzada: {N_FOLDS} folds")
+    print(f"  - CV Accuracy (media): {np.mean(cv_results['test_accuracy']):.4f}")
+    print(f"  - CV F1-Weighted (media): {np.mean(cv_results['test_f1_weighted']):.4f}")
+    print(f"  - Test Set Accuracy: {accuracy_score(y_test, y_pred):.4f}")
+    print(f"  - Gráficas guardadas en: graficas_svm/")
     print("="*70)
